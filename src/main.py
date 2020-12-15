@@ -8,6 +8,10 @@ from tensorflow.keras import layers
 import tensorflow as tf
 import time
 
+gpus = tf.config.list_physical_devices('GPU')  # tf2.1版本该函数不再是experimental
+print(gpus)  # 前面限定了只使用GPU1(索引是从0开始的,本机有2张RTX2080显卡)
+tf.config.experimental.set_memory_growth(gpus[0], True)  # 其实gpus本身就只有一个元素
+
 
 def make_generator_model():
     model = tf.keras.Sequential()
@@ -76,7 +80,7 @@ def train_step(images):
 
         gen_loss = generator_loss(fake_output)
         disc_loss = discriminator_loss(real_output, fake_output)
-    tf.print("gen", gen_loss, disc_loss)
+    # tf.print("gen", gen_loss, disc_loss)
     gradients_of_generator = gen_tape.gradient(gen_loss, generator.trainable_variables)
     gradients_of_discriminator = disc_tape.gradient(disc_loss, discriminator.trainable_variables)
 
@@ -114,18 +118,17 @@ def generate_and_save_images(model, epoch, test_input):
         plt.imshow(predictions[i, :, :, 0] * 127.5 + 127.5, cmap='gray')
         plt.axis('off')
 
-    plt.savefig(f'image/image_at_epoch_{epoch:04}.png')
+    plt.savefig(f'images/image_at_epoch_{epoch:04}.png')
     plt.show()
 
 
 BUFFER_SIZE = 60000
-BATCH_SIZE = 1024
+BATCH_SIZE = 256
 EPOCHS = 500
 NOISE_DIM = 100
 
 # mnist 数据集
 (train_images, _), (_, _) = tf.keras.datasets.mnist.load_data()
-train_images = train_images[:1024, :, :]
 
 # （数量，28，28，1）
 train_images = train_images.reshape(train_images.shape[0], 28, 28, 1).astype('float32')
