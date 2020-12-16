@@ -7,29 +7,34 @@ import PIL
 from tensorflow.keras import layers
 import tensorflow as tf
 import time
+import cv2
+
+gpus = tf.config.list_physical_devices('GPU')  # tf2.1版本该函数不再是experimental
+print(gpus)  # 前面限定了只使用GPU1(索引是从0开始的,本机有2张RTX2080显卡)
+tf.config.experimental.set_memory_growth(gpus[0], True)  # 其实gpus本身就只有一个元素
 
 
 def make_generator_model():
     model = tf.keras.Sequential()
-    model.add(layers.Dense(7 * 7 * 256, use_bias=False, input_shape=(100,)))
+    model.add(layers.Dense(4 * 4 * 512, use_bias=False, input_shape=(100,)))
     model.add(layers.BatchNormalization())
     model.add(layers.LeakyReLU())
 
-    model.add(layers.Reshape((7, 7, 256)))
-    assert model.output_shape == (None, 7, 7, 256)  # 注意：batch size 没有限制
+    model.add(layers.Reshape((4, 4, 512)))
+    assert model.output_shape == (None, 4, 4, 512)  # 注意：batch size 没有限制
 
-    model.add(layers.Conv2DTranspose(128, (5, 5), strides=(1, 1), padding='same', use_bias=False))
-    assert model.output_shape == (None, 7, 7, 128)
+    model.add(layers.Conv2DTranspose(256, (5, 5), strides=(2, 2), padding='same', use_bias=False))
+    assert model.output_shape == (None, 8, 8, 256)
     model.add(layers.BatchNormalization())
     model.add(layers.LeakyReLU())
 
-    model.add(layers.Conv2DTranspose(64, (5, 5), strides=(2, 2), padding='same', use_bias=False))
-    assert model.output_shape == (None, 14, 14, 64)
+    model.add(layers.Conv2DTranspose(128, (5, 5), strides=(2, 2), padding='same', use_bias=False))
+    assert model.output_shape == (None, 16, 16, 128)
     model.add(layers.BatchNormalization())
     model.add(layers.LeakyReLU())
 
-    model.add(layers.Conv2DTranspose(1, (5, 5), strides=(2, 2), padding='same', use_bias=False, activation='tanh'))
-    assert model.output_shape == (None, 28, 28, 1)
+    model.add(layers.Conv2DTranspose(3, (5, 5), strides=(2, 2), padding='same', use_bias=False, activation='tanh'))
+    assert model.output_shape == (None, 32, 32, 3)
 
     return model
 
@@ -37,11 +42,15 @@ def make_generator_model():
 def make_discriminator_model():
     model = tf.keras.Sequential()
     model.add(layers.Conv2D(64, (5, 5), strides=(2, 2), padding='same',
-                            input_shape=[28, 28, 1]))
+                            input_shape=[32, 32, 3]))
     model.add(layers.LeakyReLU())
     model.add(layers.Dropout(0.3))
 
     model.add(layers.Conv2D(128, (5, 5), strides=(2, 2), padding='same'))
+    model.add(layers.LeakyReLU())
+    model.add(layers.Dropout(0.3))
+
+    model.add(layers.Conv2D(64, (5, 5), strides=(2, 2), padding='same'))
     model.add(layers.LeakyReLU())
     model.add(layers.Dropout(0.3))
 
@@ -76,7 +85,6 @@ def train_step(images):
 
         gen_loss = generator_loss(fake_output)
         disc_loss = discriminator_loss(real_output, fake_output)
-    tf.print("gen", gen_loss, disc_loss)
     gradients_of_generator = gen_tape.gradient(gen_loss, generator.trainable_variables)
     gradients_of_discriminator = disc_tape.gradient(disc_loss, discriminator.trainable_variables)
 
@@ -111,29 +119,20 @@ def generate_and_save_images(model, epoch, test_input):
 
     for i in range(predictions.shape[0]):
         plt.subplot(4, 4, i + 1)
-        plt.imshow(predictions[i, :, :, 0] * 127.5 + 127.5, cmap='gray')
+        img = predictions[i, :, :, :] * 127.5 + 127.5
+        img = img.numpy().astype(np.int)
+        plt.imshow(img)
         plt.axis('off')
 
-    plt.savefig(f'image/image_at_epoch_{epoch:04}.png')
-    plt.show()
+    plt.savefig(f'images/image_at_epoch_{epoch:04}.png')
+    # plt.show()
 
 
 BUFFER_SIZE = 60000
-BATCH_SIZE = 1024
-EPOCHS = 500
+BATCH_SIZE = 128
+EPOCHS = 5000
 NOISE_DIM = 100
-
-# mnist 数据集
-(train_images, _), (_, _) = tf.keras.datasets.mnist.load_data()
-train_images = train_images[:1024, :, :]
-
-# （数量，28，28，1）
-train_images = train_images.reshape(train_images.shape[0], 28, 28, 1).astype('float32')
-# 将图片标准化到 [-1, 1] 区间内
-train_images = (train_images - 127.5) / 127.5
-
-# 批量化和打乱数据
-train_dataset = tf.data.Dataset.from_tensor_slices(train_images).shuffle(BUFFER_SIZE).batch(BATCH_SIZE)
+IMAG_SIZE = 32
 
 generator = make_generator_model()
 discriminator = make_discriminator_model()
@@ -141,8 +140,8 @@ discriminator = make_discriminator_model()
 # 该方法返回计算交叉熵损失的辅助函数
 cross_entropy = tf.keras.losses.BinaryCrossentropy(from_logits=True)
 # 优化器
-generator_optimizer = tf.keras.optimizers.Adam(1e-4)
-discriminator_optimizer = tf.keras.optimizers.Adam(1e-4)
+generator_optimizer = tf.keras.optimizers.Adam(2e-4)
+discriminator_optimizer = tf.keras.optimizers.Adam(2e-4)
 
 checkpoint_dir = './training_checkpoints'
 checkpoint_prefix = os.path.join(checkpoint_dir, "checkpoint")
@@ -155,4 +154,23 @@ checkpoint = tf.train.Checkpoint(generator_optimizer=generator_optimizer,
 seed = tf.random.normal([16, NOISE_DIM])
 
 if __name__ == '__main__':
+
+    train_images = []
+    for file_name in os.listdir("../dataset/anime"):
+        img_array = cv2.imread(os.path.join(f'../dataset/anime/{file_name}'))
+        # CV2是BGR通道，PLT是RGB通道
+        img_array = cv2.resize(img_array[:, :, ::-1], (IMAG_SIZE, IMAG_SIZE))
+        # plt.imshow(img_array)
+        # plt.show()
+        train_images.append(img_array)
+    train_images = np.array(train_images, dtype='float32')
+    print(train_images.shape)
+
+    # 将图片标准化到 [-1, 1] 区间内
+    train_images = (train_images - 127.5) / 127.5
+    # 批量化和打乱数据
+    train_dataset = tf.data.Dataset.from_tensor_slices(train_images).shuffle(BUFFER_SIZE).batch(BATCH_SIZE)
+    # generate_and_save_images(generator, 1 + 1, seed)
+
+    checkpoint.restore(tf.train.latest_checkpoint(checkpoint_prefix))
     train(train_dataset, EPOCHS)
