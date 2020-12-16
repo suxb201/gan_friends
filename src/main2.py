@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import cv2
 from PIL import Image
-
+import time
 # 方便复现
 manual_seed = 999
 print("Random Seed: ", manual_seed)
@@ -24,7 +24,7 @@ torch.manual_seed(manual_seed)
 
 BATCH_SIZE = 128
 IMAGE_SIZE = 64
-EPOCHS = 5
+EPOCHS = 5000
 LR = 0.0002
 BETA1 = 0.5  # Beta1 hyper param for Adam optimizers
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -35,7 +35,9 @@ class Dataset:
     def __init__(self, path):
         self.train_images = []
         for file_name in os.listdir(path):
-            img = Image.open(os.path.join(f'{path}/{file_name}'))
+            img = cv2.imread(os.path.join(f'{path}/{file_name}'))
+            img = img[:, :, ::-1]
+            img = Image.fromarray(img)
             self.train_images.append(img)
 
         self.transforms = transforms.Compose([
@@ -128,21 +130,23 @@ class Discriminator(nn.Module):
 def train():
     criterion = nn.BCELoss()
 
-    optimizer_d = optim.Adam(discriminator.parameters(), lr=LR, betas=(BETA1, 0.999))
-    optimizer_g = optim.Adam(generator.parameters(), lr=LR, betas=(BETA1, 0.999))
+    optimizer_d = optim.Adam(discriminator.parameters(),
+                             lr=LR, betas=(BETA1, 0.999))
+    optimizer_g = optim.Adam(generator.parameters(),
+                             lr=LR, betas=(BETA1, 0.999))
 
     print("Starting Training Loop...")
 
     for epoch in range(EPOCHS):
+        time_start=time.time()
+        
         for i, data in enumerate(dataloader, 0):
-            batch_size = data[0].size(0)
+            real_label = torch.full( (BATCH_SIZE,), 1.0, dtype=torch.float, device=DEVICE)
+            fake_label = torch.full( (BATCH_SIZE,), 0.0, dtype=torch.float, device=DEVICE)
 
-            real_label = torch.full((batch_size,), 1.0, dtype=torch.float, device=DEVICE)
-            fake_label = torch.full((batch_size,), 0.0, dtype=torch.float, device=DEVICE)
-
-            noise = torch.randn(batch_size, 100, 1, 1, device=DEVICE)
+            noise = torch.randn(BATCH_SIZE, 100, 1, 1, device=DEVICE)
             fake_image = generator(noise)
-            real_image = data[0].to(DEVICE)
+            real_image = data.to(DEVICE)
 
             real_output = discriminator(real_image)
             fake_output = discriminator(fake_image.detach())
@@ -161,13 +165,18 @@ def train():
             optimizer_g.step()
 
             if i % 50 == 0:
-                print('[%d/%d][%d/%d]\tLoss_D: %.4f\tLoss_G: %.4f' % (epoch, EPOCHS, i, len(dataloader), loss_d.item(), loss_g.item()))
-        # save
+                print('[%d/%d][%d/%d]\tLoss_D: %.4f\tLoss_G: %.4f' %
+                    (epoch, EPOCHS, i, len(dataloader), loss_d.item(), loss_g.item()))
+        time_end=time.time()
+        print(f"time used: {time_end-time_start:.2f}")
+        # save image
         with torch.no_grad():
             fake_image = generator(fixed_noise).detach().cpu()
-            fake_image = torchvision.utils.make_grid(fake_image, padding=2, normalize=True)
-            plt.imshow(fake_image)
-            plt.axis('off')
+        fake_image = torchvision.utils.make_grid(
+            fake_image, padding=5, normalize=True)
+        fake_image = np.transpose(fake_image, (1, 2, 0))
+        plt.imshow(fake_image)
+        plt.axis('off')
         plt.savefig(f'images/image_at_epoch_{epoch:04}.png')
 
 
@@ -177,26 +186,31 @@ if __name__ == '__main__':
     discriminator = Discriminator().to(DEVICE)
     discriminator.apply(weights_init)
 
-    dataset = Dataset("../dataset/anime")
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+    dataset = Dataset("../dataset/moe")
+    dataloader = torch.utils.data.DataLoader(dataset,
+                                             batch_size=BATCH_SIZE,
+                                             shuffle=True, num_workers=0,
+                                             drop_last=True,
+                                             pin_memory=True
+                                             )
+    train()
+    # # Plot some training images
+    # real_batch = next(iter(dataloader))
+    # print(real_batch.shape)
+    # plt.figure(figsize=(8, 8))
+    # plt.axis("off")
+    # plt.title("Training Images")
+    # plt.imshow(
+    #     np.transpose(
+    #         torchvision.utils.make_grid(real_batch[:64], padding=2, normalize=True),
+    #         (1, 2, 0)
+    #     ))
+    # plt.show()
 
-    # Plot some training images
-    real_batch = next(iter(dataloader))
-    print(real_batch.shape)
-    plt.figure(figsize=(8, 8))
-    plt.axis("off")
-    plt.title("Training Images")
-    plt.imshow(
-        np.transpose(
-            torchvision.utils.make_grid(real_batch[:64], padding=2, normalize=True),
-            (1, 2, 0)
-        ))
-    plt.show()
-
-    with torch.no_grad():
-        fake_image = generator(fixed_noise).detach().cpu()
-    fake_image = torchvision.utils.make_grid(fake_image, padding=2, normalize=True)
-    fake_image = np.transpose(fake_image, (1, 2, 0))
-    plt.imshow(fake_image)
-    plt.axis('off')
-    plt.savefig(f'images/image_at_epoch_{1:04}.png')
+    # with torch.no_grad():
+    #     fake_image = generator(fixed_noise).detach().cpu()
+    # fake_image = torchvision.utils.make_grid(fake_image, padding=2, normalize=True)
+    # fake_image = np.transpose(fake_image, (1, 2, 0))
+    # plt.imshow(fake_image)
+    # plt.axis('off')
+    # plt.savefig(f'images/image_at_epoch_{1:04}.png')
