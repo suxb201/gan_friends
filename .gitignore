@@ -1,3 +1,8 @@
+.idea
+src/image
+src/training_checkpoints
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
