@@ -13,6 +13,8 @@ import torchvision.utils
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import cv2
+from PIL import Image
 
 # 方便复现
 manual_seed = 999
@@ -27,6 +29,29 @@ LR = 0.0002
 BETA1 = 0.5  # Beta1 hyper param for Adam optimizers
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 fixed_noise = torch.randn(64, 100, 1, 1, device=DEVICE)
+
+
+class Dataset:
+    def __init__(self, path):
+        self.train_images = []
+        for file_name in os.listdir(path):
+            img = Image.open(os.path.join(f'{path}/{file_name}'))
+            self.train_images.append(img)
+
+        self.transforms = transforms.Compose([
+            transforms.Resize(IMAGE_SIZE),
+            transforms.CenterCrop(IMAGE_SIZE),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ])
+
+    def __getitem__(self, item):
+        ret = self.train_images[item]
+        ret = self.transforms(ret)
+        return ret
+
+    def __len__(self):
+        return len(self.train_images)
 
 
 def weights_init(m):
@@ -101,10 +126,6 @@ class Discriminator(nn.Module):
 
 
 def train():
-    generator = Generator().to(DEVICE)
-    generator.apply(weights_init)
-    discriminator = Discriminator().to(DEVICE)
-    discriminator.apply(weights_init)
     criterion = nn.BCELoss()
 
     optimizer_d = optim.Adam(discriminator.parameters(), lr=LR, betas=(BETA1, 0.999))
@@ -151,12 +172,12 @@ def train():
 
 
 if __name__ == '__main__':
-    dataset = torchvision.datasets.ImageFolder(root="../dataset/anime", transform=transforms.Compose([
-        transforms.Resize(IMAGE_SIZE),
-        transforms.CenterCrop(IMAGE_SIZE),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ]))
+    generator = Generator().to(DEVICE)
+    generator.apply(weights_init)
+    discriminator = Discriminator().to(DEVICE)
+    discriminator.apply(weights_init)
+
+    dataset = Dataset("../dataset/anime")
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
 
     # Plot some training images
@@ -167,6 +188,15 @@ if __name__ == '__main__':
     plt.title("Training Images")
     plt.imshow(
         np.transpose(
-            torchvision.utils.make_grid(real_batch[0][:64], padding=2, normalize=True),
+            torchvision.utils.make_grid(real_batch[:64], padding=2, normalize=True),
             (1, 2, 0)
         ))
+    plt.show()
+
+    with torch.no_grad():
+        fake_image = generator(fixed_noise).detach().cpu()
+    fake_image = torchvision.utils.make_grid(fake_image, padding=2, normalize=True)
+    fake_image = np.transpose(fake_image, (1, 2, 0))
+    plt.imshow(fake_image)
+    plt.axis('off')
+    plt.savefig(f'images/image_at_epoch_{1:04}.png')
