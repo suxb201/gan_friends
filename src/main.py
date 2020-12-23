@@ -1,176 +1,216 @@
-import glob
-import imageio
-import matplotlib.pyplot as plt
-import numpy as np
+import argparse
 import os
-import PIL
-from tensorflow.keras import layers
-import tensorflow as tf
-import time
+import random
+import torch
+import torch.nn as nn
+import torch.nn.parallel
+import torch.backends.cudnn as cudnn
+import torch.optim as optim
+import torch.utils.data
+import torchvision.datasets
+import torchvision.transforms as transforms
+import torchvision.utils
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 import cv2
+from PIL import Image
+import time
+# 方便复现
+manual_seed = 999
+print("Random Seed: ", manual_seed)
+random.seed(manual_seed)
+torch.manual_seed(manual_seed)
 
-gpus = tf.config.list_physical_devices('GPU')  # tf2.1版本该函数不再是experimental
-print(gpus)  # 前面限定了只使用GPU1(索引是从0开始的,本机有2张RTX2080显卡)
-tf.config.experimental.set_memory_growth(gpus[0], True)  # 其实gpus本身就只有一个元素
-
-
-def make_generator_model():
-    model = tf.keras.Sequential()
-    model.add(layers.Dense(4 * 4 * 512, use_bias=False, input_shape=(100,)))
-    model.add(layers.BatchNormalization())
-    model.add(layers.LeakyReLU())
-
-    model.add(layers.Reshape((4, 4, 512)))
-    assert model.output_shape == (None, 4, 4, 512)  # 注意：batch size 没有限制
-
-    model.add(layers.Conv2DTranspose(256, (5, 5), strides=(2, 2), padding='same', use_bias=False))
-    assert model.output_shape == (None, 8, 8, 256)
-    model.add(layers.BatchNormalization())
-    model.add(layers.LeakyReLU())
-
-    model.add(layers.Conv2DTranspose(128, (5, 5), strides=(2, 2), padding='same', use_bias=False))
-    assert model.output_shape == (None, 16, 16, 128)
-    model.add(layers.BatchNormalization())
-    model.add(layers.LeakyReLU())
-
-    model.add(layers.Conv2DTranspose(3, (5, 5), strides=(2, 2), padding='same', use_bias=False, activation='tanh'))
-    assert model.output_shape == (None, 32, 32, 3)
-
-    return model
-
-
-def make_discriminator_model():
-    model = tf.keras.Sequential()
-    model.add(layers.Conv2D(64, (5, 5), strides=(2, 2), padding='same',
-                            input_shape=[32, 32, 3]))
-    model.add(layers.LeakyReLU())
-    model.add(layers.Dropout(0.3))
-
-    model.add(layers.Conv2D(128, (5, 5), strides=(2, 2), padding='same'))
-    model.add(layers.LeakyReLU())
-    model.add(layers.Dropout(0.3))
-
-    model.add(layers.Conv2D(64, (5, 5), strides=(2, 2), padding='same'))
-    model.add(layers.LeakyReLU())
-    model.add(layers.Dropout(0.3))
-
-    model.add(layers.Flatten())
-    model.add(layers.Dense(1))
-
-    return model
-
-
-def discriminator_loss(real_output, fake_output):
-    real_loss = cross_entropy(tf.ones_like(real_output), real_output)
-    fake_loss = cross_entropy(tf.zeros_like(fake_output), fake_output)
-    total_loss = real_loss + fake_loss
-    return total_loss
-
-
-def generator_loss(fake_output):
-    return cross_entropy(tf.ones_like(fake_output), fake_output)
-
-
-# 注意 `tf.function` 的使用
-# 该注解使函数被“编译”
-@tf.function
-def train_step(images):
-    noise = tf.random.normal([BATCH_SIZE, NOISE_DIM])
-
-    with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
-        generated_images = generator(noise, training=True)
-
-        real_output = discriminator(images, training=True)
-        fake_output = discriminator(generated_images, training=True)
-
-        gen_loss = generator_loss(fake_output)
-        disc_loss = discriminator_loss(real_output, fake_output)
-    gradients_of_generator = gen_tape.gradient(gen_loss, generator.trainable_variables)
-    gradients_of_discriminator = disc_tape.gradient(disc_loss, discriminator.trainable_variables)
-
-    generator_optimizer.apply_gradients(zip(gradients_of_generator, generator.trainable_variables))
-    discriminator_optimizer.apply_gradients(zip(gradients_of_discriminator, discriminator.trainable_variables))
-
-
-def train(dataset, epochs):
-    for epoch in range(epochs):
-        start = time.time()
-
-        for image_batch in dataset:
-            train_step(image_batch)
-
-        # 继续进行时为 GIF 生成图像
-        generate_and_save_images(generator, epoch + 1, seed)
-
-        # 每 15 个 epoch 保存一次模型
-        if (epoch + 1) % 15 == 0:
-            checkpoint.save(file_prefix=checkpoint_prefix)
-
-        print('Time for epoch {} is {} sec'.format(epoch + 1, time.time() - start))
-
-    # 最后一个 epoch 结束后生成图片
-    generate_and_save_images(generator, epochs, seed)
-
-
-def generate_and_save_images(model, epoch, test_input):
-    # 注意 training` 设定为 False
-    # 因此，所有层都在推理模式下运行（batchnorm）。
-    predictions = model(test_input, training=False)
-
-    for i in range(predictions.shape[0]):
-        plt.subplot(4, 4, i + 1)
-        img = predictions[i, :, :, :] * 127.5 + 127.5
-        img = img.numpy().astype(np.int)
-        plt.imshow(img)
-        plt.axis('off')
-
-    plt.savefig(f'images/image_at_epoch_{epoch:04}.png')
-    # plt.show()
-
-
-BUFFER_SIZE = 60000
 BATCH_SIZE = 128
+IMAGE_SIZE = 64
 EPOCHS = 5000
-NOISE_DIM = 100
-IMAG_SIZE = 32
+LR = 0.0002
+BETA1 = 0.5  # Beta1 hyper param for Adam optimizers
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+fixed_noise = torch.randn(64, 100, 1, 1, device=DEVICE)
 
-generator = make_generator_model()
-discriminator = make_discriminator_model()
 
-# 该方法返回计算交叉熵损失的辅助函数
-cross_entropy = tf.keras.losses.BinaryCrossentropy(from_logits=True)
-# 优化器
-generator_optimizer = tf.keras.optimizers.Adam(2e-4)
-discriminator_optimizer = tf.keras.optimizers.Adam(2e-4)
+class Dataset:
+    def __init__(self, path):
+        self.train_images = []
+        for file_name in os.listdir(path):
+            img = cv2.imread(os.path.join(f'{path}/{file_name}'))
+            img = img[:, :, ::-1]
+            img = Image.fromarray(img)
+            self.train_images.append(img)
 
-checkpoint_dir = './training_checkpoints'
-checkpoint_prefix = os.path.join(checkpoint_dir, "checkpoint")
-checkpoint = tf.train.Checkpoint(generator_optimizer=generator_optimizer,
-                                 discriminator_optimizer=discriminator_optimizer,
-                                 generator=generator,
-                                 discriminator=discriminator)
+        self.transforms = transforms.Compose([
+            transforms.Resize(IMAGE_SIZE),
+            transforms.CenterCrop(IMAGE_SIZE),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ])
 
-# 我们将重复使用该种子（因此在动画 GIF 中更容易可视化进度）
-seed = tf.random.normal([16, NOISE_DIM])
+    def __getitem__(self, item):
+        ret = self.train_images[item]
+        ret = self.transforms(ret)
+        return ret
+
+    def __len__(self):
+        return len(self.train_images)
+
+
+def weights_init(m):
+    classname = m.__class__.__name__
+    if classname.find('Conv') != -1:
+        nn.init.normal_(m.weight.data, 0.0, 0.02)
+    elif classname.find('BatchNorm') != -1:
+        nn.init.normal_(m.weight.data, 1.0, 0.02)
+        nn.init.constant_(m.bias.data, 0)
+
+
+class Generator(nn.Module):
+    def __init__(self):
+        super(Generator, self).__init__()
+
+        self.net = nn.Sequential(
+            # 100 -> 64x8
+            nn.ConvTranspose2d(100, 64 * 8, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(64 * 8),
+            nn.ReLU(True),
+            # state size. (64*8) x 4 x 4
+            nn.ConvTranspose2d(64 * 8, 64 * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(64 * 4),
+            nn.ReLU(True),
+            # state size. (64*4) x 8 x 8
+            nn.ConvTranspose2d(64 * 4, 64 * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(64 * 2),
+            nn.ReLU(True),
+            # state size. (64*2) x 16 x 16
+            nn.ConvTranspose2d(64 * 2, 64, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            # state size. (64) x 32 x 32
+            nn.ConvTranspose2d(64, 3, 4, 2, 1, bias=False),
+            nn.Tanh()
+            # state size. (3) x 64 x 64
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+
+        self.net = nn.Sequential(
+            # input is (3) x 64 x 64
+            nn.Conv2d(3, 64, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (64) x 32 x 32
+            nn.Conv2d(64, 64 * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(64 * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (64*2) x 16 x 16
+            nn.Conv2d(64 * 2, 64 * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(64 * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (64*4) x 8 x 8
+            nn.Conv2d(64 * 4, 64 * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(64 * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (64*8) x 4 x 4
+            nn.Conv2d(64 * 8, 1, 4, 1, 0, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        x = self.net(x)
+        x = x.view(-1)
+        return x
+
+
+def train():
+    criterion = nn.BCELoss()
+
+    optimizer_d = optim.Adam(discriminator.parameters(),
+                             lr=LR, betas=(BETA1, 0.999))
+    optimizer_g = optim.Adam(generator.parameters(),
+                             lr=LR, betas=(BETA1, 0.999))
+
+    print("Starting Training Loop...")
+
+    for epoch in range(EPOCHS):
+        time_start=time.time()
+
+        for i, data in enumerate(dataloader, 0):
+            real_label = torch.full( (BATCH_SIZE,), 1.0, dtype=torch.float, device=DEVICE)
+            fake_label = torch.full( (BATCH_SIZE,), 0.0, dtype=torch.float, device=DEVICE)
+
+            noise = torch.randn(BATCH_SIZE, 100, 1, 1, device=DEVICE)
+            fake_image = generator(noise)
+            real_image = data.to(DEVICE)
+
+            real_output = discriminator(real_image)
+            fake_output = discriminator(fake_image.detach())
+
+            loss_real = criterion(real_output, real_label)
+            loss_fake = criterion(fake_output, fake_label)
+            loss_d = loss_real + loss_fake
+            discriminator.zero_grad()
+            loss_d.backward()
+            optimizer_d.step()
+
+            output = discriminator(fake_image)
+            loss_g = criterion(output, real_label)
+            generator.zero_grad()
+            loss_g.backward()
+            optimizer_g.step()
+
+            if i % 50 == 0:
+                print('[%d/%d][%d/%d]\tLoss_D: %.4f\tLoss_G: %.4f' %
+                      (epoch, EPOCHS, i, len(dataloader), loss_d.item(), loss_g.item()))
+        time_end=time.time()
+        print(f"time used: {time_end-time_start:.2f}")
+        # save image
+        with torch.no_grad():
+            fake_image = generator(fixed_noise).detach().cpu()
+        fake_image = torchvision.utils.make_grid(
+            fake_image, padding=5, normalize=True)
+        fake_image = np.transpose(fake_image, (1, 2, 0))
+        plt.imshow(fake_image)
+        plt.axis('off')
+        plt.savefig(f'images/image_at_epoch_{epoch:04}.png')
+
 
 if __name__ == '__main__':
+    generator = Generator().to(DEVICE)
+    generator.apply(weights_init)
+    discriminator = Discriminator().to(DEVICE)
+    discriminator.apply(weights_init)
 
-    train_images = []
-    for file_name in os.listdir("../dataset/anime"):
-        img_array = cv2.imread(os.path.join(f'../dataset/anime/{file_name}'))
-        # CV2是BGR通道，PLT是RGB通道
-        img_array = cv2.resize(img_array[:, :, ::-1], (IMAG_SIZE, IMAG_SIZE))
-        # plt.imshow(img_array)
-        # plt.show()
-        train_images.append(img_array)
-    train_images = np.array(train_images, dtype='float32')
-    print(train_images.shape)
+    dataset = Dataset("../dataset/moe")
+    dataloader = torch.utils.data.DataLoader(dataset,
+                                             batch_size=BATCH_SIZE,
+                                             shuffle=True, num_workers=0,
+                                             drop_last=True,
+                                             pin_memory=True
+                                             )
+    train()
+    # # Plot some training images
+    # real_batch = next(iter(dataloader))
+    # print(real_batch.shape)
+    # plt.figure(figsize=(8, 8))
+    # plt.axis("off")
+    # plt.title("Training Images")
+    # plt.imshow(
+    #     np.transpose(
+    #         torchvision.utils.make_grid(real_batch[:64], padding=2, normalize=True),
+    #         (1, 2, 0)
+    #     ))
+    # plt.show()
 
-    # 将图片标准化到 [-1, 1] 区间内
-    train_images = (train_images - 127.5) / 127.5
-    # 批量化和打乱数据
-    train_dataset = tf.data.Dataset.from_tensor_slices(train_images).shuffle(BUFFER_SIZE).batch(BATCH_SIZE)
-    # generate_and_save_images(generator, 1 + 1, seed)
-
-    checkpoint.restore(tf.train.latest_checkpoint(checkpoint_prefix))
-    train(train_dataset, EPOCHS)
+    # with torch.no_grad():
+    #     fake_image = generator(fixed_noise).detach().cpu()
+    # fake_image = torchvision.utils.make_grid(fake_image, padding=2, normalize=True)
+    # fake_image = np.transpose(fake_image, (1, 2, 0))
+    # plt.imshow(fake_image)
+    # plt.axis('off')
+    # plt.savefig(f'images/image_at_epoch_{1:04}.png')
